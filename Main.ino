@@ -44,8 +44,6 @@ void Driver_Init()
     QMI8658_Init();
     BAT_Init();
 
-    // Removed Flash_test() because undefined
-
     xTaskCreatePinnedToCore(
         Driver_Loop,
         "Driver Task",
@@ -62,18 +60,34 @@ void Lvgl_GForce_Loop()
 {
     if (!ui_dot) return;
 
-    float xpos = 240 + ((x / 9.81f) * 150);
-    float ypos = 240 + ((y / 9.81f) * 150);
+    // Center is 240, 240 for 480x480 display
+    // Scale: ±1G = ±150 pixels from center
+    float xpos = 240 - ((x / 9.81f) * 150);
+    float ypos = 240 - ((y / 9.81f) * 150);
 
-    xpos = constrain(xpos, 0, 479);
-    ypos = constrain(ypos, 0, 479);
+    // Clamp to screen bounds (with margin for dot size ~37px)
+    xpos = constrain(xpos, 20, 460);
+    ypos = constrain(ypos, 20, 460);
 
     lv_obj_set_pos(ui_dot, (int)xpos, (int)ypos);
 
-    if (ui_Accel) lv_label_set_text_fmt(ui_Accel, "Accel: %.2f", max(y / 9.81f, 0.0f));
-    if (ui_Brake) lv_label_set_text_fmt(ui_Brake, "Brake: %.2f", abs(min(y / 9.81f, 0.0f)));
-    if (ui_Left) lv_label_set_text_fmt(ui_Left, "Left: %.2f", abs(min(x / 9.81f, 0.0f)));
-    if (ui_Right) lv_label_set_text_fmt(ui_Right, "Right: %.2f", max(x / 9.81f, 0.0f));
+    // Update labels with G-force values
+    if (ui_Accel) {
+        float accel_g = y / 9.81f;
+        lv_label_set_text_fmt(ui_Accel, "%.2f", max(accel_g, 0.0f));
+    }
+    if (ui_Brake) {
+        float brake_g = y / 9.81f;
+        lv_label_set_text_fmt(ui_Brake, "%.2f", abs(min(brake_g, 0.0f)));
+    }
+    if (ui_Left) {
+        float left_g = x / 9.81f;
+        lv_label_set_text_fmt(ui_Left, "%.2f", abs(min(left_g, 0.0f)));
+    }
+    if (ui_Right) {
+        float right_g = x / 9.81f;
+        lv_label_set_text_fmt(ui_Right, "%.2f", max(right_g, 0.0f));
+    }
 }
 
 // ------------------ Setup ------------------
@@ -92,14 +106,16 @@ void setup()
     // LVGL init + PSRAM buffers
     Lvgl_Init();
 
-    // Remove demo label if Lvgl_Init created one
-    lv_obj_clean(lv_scr_act());
-
     // Initialize SquareLine UI
-    ui_init();
-    lv_scr_load(ui_gforce);
-
-    // Removed SD_Init() call if undefined
+    Serial.println("Initializing UI...");
+    ui_init();  // This handles screen creation and loading
+    
+    // Debug: Verify screen was created
+    if (ui_gforce == NULL) {
+        Serial.println("ERROR: ui_gforce is NULL!");
+    } else {
+        Serial.println("SUCCESS: UI initialized");
+    }
 
     Serial.println("=== Setup Complete ===");
 }
@@ -107,7 +123,7 @@ void setup()
 // ------------------ Main Loop ------------------
 void loop()
 {
-    Lvgl_GForce_Loop();
-    Lvgl_Loop(); // LVGL internal handler
+    Lvgl_GForce_Loop();  // Update G-force display
+    Lvgl_Loop();         // LVGL internal handler (lv_timer_handler)
     delay(5);
 }
