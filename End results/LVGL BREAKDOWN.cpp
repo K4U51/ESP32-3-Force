@@ -1,11 +1,23 @@
+/* 
+  GForce Gauge ESP32-S3 LVGL Example
+  -----------------------------------
+  Instructions:
+  1. Replace the `extern lv_img_dsc_t` declarations with your own PNG images in lv_img_dsc_t format.
+     Example: lv_img_dsc_t splash_img; lv_img_dsc_t screen1_img; etc.
+  2. Implement the functions:
+       float get_gyro_x();  // returns gyro X value
+       float get_gyro_y();  // returns gyro Y value
+       float get_current_timer(); // returns current timer in seconds
+  3. Initialize your ESP32-S3 display and touch drivers in setup() before init_screens().
+  4. This sketch does NOT use SquareLine Studio. All UI is coded manually.
+  5. Touch anywhere on a screen to go to the next screen (Screen4 loops back to Screen1).
+  6. Tasks only run for the active screen to save CPU.
+*/
+
+#include <Arduino.h>
 #include "lvgl.h"
 
-// --- Forward declarations ---
-float get_gyro_x(void);
-float get_gyro_y(void);
-float get_current_timer(void);
-
-// --- Images ---
+// --- Replace these with your actual PNG images ---
 extern lv_img_dsc_t splash_img;
 extern lv_img_dsc_t screen1_img;
 extern lv_img_dsc_t screen2_img;
@@ -14,34 +26,57 @@ extern lv_img_dsc_t screen4_img;
 extern lv_img_dsc_t dot_img;
 extern lv_img_dsc_t stamp_img;
 
+// --- Forward declarations for user functions ---
+float get_gyro_x(void);
+float get_gyro_y(void);
+float get_current_timer(void);
+
+// --- Screen objects ---
+lv_obj_t *scr_splash, *scr1, *scr2, *scr3, *scr4;
+
+// Screen1 dot
+lv_obj_t *dot;
+
+// Screen2 labels
+lv_obj_t *lbl_peak_y, *lbl_neg_y, *lbl_total_x;
+
+// Screen3 timer + lap button
+lv_obj_t *lbl_times[4];
+lv_obj_t *btn_lap;
+
+// Screen4 container for stamps
+lv_obj_t *screen4_container;
+
+// --- Active flags ---
+bool screen1_active = false;
+bool screen2_active = false;
+bool screen4_active = false;
+
 // --- Event callback to load next screen ---
 void next_screen_event_cb(lv_event_t *e) {
     lv_obj_t *next = (lv_obj_t *)lv_event_get_user_data(e);
     lv_scr_load(next);
 }
 
-// --- Screen objects ---
-lv_obj_t *scr_splash, *scr1, *scr2, *scr3, *scr4;
+// --- Lap button callback ---
+void lap_button_cb(lv_event_t *e){
+    static int idx = 0;
+    float time = get_current_timer();
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.2f s", time);
+    lv_label_set_text(lbl_times[idx], buf);
+    idx = (idx + 1) % 4;
+}
 
-// --- Screen1: Dot moving with gyro ---
-lv_obj_t *dot;
+// --- Screen change hook ---
+void lv_scr_change_hook(lv_event_t *e){
+    lv_obj_t *act = lv_scr_act();
+    screen1_active = (act == scr1);
+    screen2_active = (act == scr2);
+    screen4_active = (act == scr4);
+}
 
-// --- Screen2: Labels for gyro stats ---
-lv_obj_t *lbl_peak_y, *lbl_neg_y, *lbl_total_x;
-
-// --- Screen3: Timer labels and lap button ---
-lv_obj_t *lbl_times[4];
-lv_obj_t *btn_lap;
-
-// --- Screen4: Stamp ---
-lv_obj_t *screen4_container;
-
-// --- Global flags to control tasks ---
-bool screen1_active = false;
-bool screen2_active = false;
-bool screen4_active = false;
-
-// --- Initialize screens and UI ---
+// --- Initialize all screens ---
 void init_screens(void) {
     // Create screens
     scr_splash = lv_obj_create(NULL);
@@ -81,6 +116,7 @@ void init_screens(void) {
     lv_obj_align(btn_lap, LV_ALIGN_BOTTOM_MID, 0, -10);
     lv_obj_t *btn_label = lv_label_create(btn_lap);
     lv_label_set_text(btn_label, "Lap");
+    lv_obj_add_event_cb(btn_lap, lap_button_cb, LV_EVENT_CLICKED, NULL);
 
     for(int i=0;i<4;i++){
         lbl_times[i] = lv_label_create(scr3);
@@ -88,9 +124,9 @@ void init_screens(void) {
         lv_obj_align(lbl_times[i], LV_ALIGN_TOP_MID, 0, 10 + i*30);
     }
 
-    // --- Screen4 container for stamps ---
+    // --- Screen4 stamp container ---
     screen4_container = lv_obj_create(scr4);
-    lv_obj_set_size(screen4_container, 480, 480); // fill screen
+    lv_obj_set_size(screen4_container, 480, 480);
     lv_obj_clear_flag(screen4_container, LV_OBJ_FLAG_SCROLLABLE);
 
     // --- Touch navigation ---
@@ -98,24 +134,17 @@ void init_screens(void) {
     lv_obj_add_event_cb(scr1, next_screen_event_cb, LV_EVENT_CLICKED, scr2);
     lv_obj_add_event_cb(scr2, next_screen_event_cb, LV_EVENT_CLICKED, scr3);
     lv_obj_add_event_cb(scr3, next_screen_event_cb, LV_EVENT_CLICKED, scr4);
-    lv_obj_add_event_cb(scr4, next_screen_event_cb, LV_EVENT_CLICKED, scr1); // loop
+    lv_obj_add_event_cb(scr4, next_screen_event_cb, LV_EVENT_CLICKED, scr1);
 
-    // --- Lap button callback ---
-    lv_obj_add_event_cb(btn_lap, [](lv_event_t *e){
-        static int idx = 0;
-        float time = get_current_timer();
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%.2f s", time);
-        lv_label_set_text(lbl_times[idx], buf);
-        idx = (idx + 1) % 4;
-    }, LV_EVENT_CLICKED, NULL);
-
-    // Load splash screen first
+    // Load splash screen
     lv_scr_load(scr_splash);
+
+    // Attach screen change hook
+    lv_obj_add_event_cb(lv_scr_act(), lv_scr_change_hook, LV_EVENT_SCREEN_CHANGED, NULL);
 }
 
-// --- Screen tasks ---
-// Screen1 dot update
+// --- Tasks ---
+// Screen1 dot
 void screen1_dot_task(void *param){
     while(1){
         if(screen1_active){
@@ -127,7 +156,7 @@ void screen1_dot_task(void *param){
     }
 }
 
-// Screen2 labels update
+// Screen2 labels
 void screen2_label_task(void *param){
     float y_peak=0, y_neg=0, x_total=0;
     while(1){
@@ -146,7 +175,7 @@ void screen2_label_task(void *param){
     }
 }
 
-// Screen4 stamp task
+// Screen4 stamp
 void screen4_stamp_task(void *param){
     while(1){
         if(screen4_active){
@@ -160,10 +189,25 @@ void screen4_stamp_task(void *param){
     }
 }
 
-// --- LVGL screen change hook to update active flags ---
-void lv_scr_change_hook(lv_event_t *e){
-    lv_obj_t *act = lv_scr_act();
-    screen1_active = (act == scr1);
-    screen2_active = (act == scr2);
-    screen4_active = (act == scr4);
+// --- Arduino setup ---
+void setup() {
+    Serial.begin(115200);
+
+    // Initialize LVGL
+    lv_init();
+    // TODO: Initialize your display and touch drivers here
+
+    // Initialize screens
+    init_screens();
+
+    // Start FreeRTOS tasks
+    xTaskCreate(screen1_dot_task, "dot_task", 2048, NULL, 2, NULL);
+    xTaskCreate(screen2_label_task, "label_task", 2048, NULL, 2, NULL);
+    xTaskCreate(screen4_stamp_task, "stamp_task", 2048, NULL, 2, NULL);
+}
+
+// --- Arduino loop ---
+void loop() {
+    lv_timer_handler();
+    delay(5);
 }
