@@ -97,25 +97,33 @@ void setup()
     delay(1000);
     Serial.println("\n\n=== System Booting ===");
 
-    // Initialize drivers and sensors
-    Driver_Init();
+    // ----------------------------
+    // 1️⃣ Initialize drivers first
+    // ----------------------------
+    Driver_Init();   // Sensors, I2C, gyro, battery, etc.
 
-    // Display init (includes touch/backlight)
-    LCD_Init();  
+    // ----------------------------
+    // 2️⃣ Initialize hardware
+    // ----------------------------
+    LCD_Init();      // Sets up ST7701 panel, backlight, touch
+                     // Note: no LVGL registration here, just hardware
 
-    // LVGL init + PSRAM buffers
-    Lvgl_Init();
+    // ----------------------------
+    // 3️⃣ Initialize LVGL
+    // ----------------------------
+    Lvgl_Init();     // lv_init() + flush callback + draw buffers
+                     // Uses the panel_handle created in LCD_Init()
 
-    // Initialize SquareLine UI
+    // ----------------------------
+    // 4️⃣ Initialize your SquareLine UI
+    // ----------------------------
     Serial.println("Initializing UI...");
-    ui_init();  // This handles screen creation and loading
-    
-    // Debug: Verify screen was created
-    if (ui_gforce == NULL) {
-        Serial.println("ERROR: ui_gforce is NULL!");
-    } else {
-        Serial.println("SUCCESS: UI initialized");
-    }
+    ui_init();       // Creates screens, labels, dot, etc.
+
+    // Optional: quick test to confirm LVGL works
+    lv_obj_t *label = lv_label_create(lv_scr_act());
+    lv_label_set_text(label, "GForce Gauge Ready!");
+    lv_obj_center(label);
 
     Serial.println("=== Setup Complete ===");
 }
