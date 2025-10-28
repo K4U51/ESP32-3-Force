@@ -62,23 +62,6 @@ void LCD_Init() {
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
-    // ✅ Bind LVGL to this RGB panel
-    buf1 = (lv_color_t *)heap_caps_malloc(480 * 20 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    buf2 = (lv_color_t *)heap_caps_malloc(480 * 20 * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
-    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, 480 * 20);
-
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.flush_cb = [](lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
-        esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, color_p);
-        lv_disp_flush_ready(drv);
-    };
-    disp_drv.hor_res = 480;
-    disp_drv.ver_res = 480;
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
-
-    Serial.println("LCD_Init: LVGL display registered.");
-
     // Backlight
     ledcSetup(0, 5000, 10);
     ledcAttachPin(LCD_Backlight_PIN, 0);
@@ -88,3 +71,4 @@ void LCD_Init() {
 
     Touch_Init();
 }
+
