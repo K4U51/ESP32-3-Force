@@ -77,6 +77,8 @@ void lap_button_cb(lv_event_t *e){
     snprintf(buf,sizeof(buf),"%.2f s", lap_times[lap_idx]);
     lv_label_set_text(lbl_times[lap_idx], buf);
     lap_idx = (lap_idx + 1) % 4;
+
+    lv_event_set_ready(e); // Stop propagation to screen
 }
 
 // --- Screen3 reset button ---
@@ -88,6 +90,8 @@ void reset_button_cb(lv_event_t *e){
         lv_label_set_text(lbl_times[i],"--:--.--");
     }
     lv_label_set_text(lbl_timer,"0.00 s");
+
+    lv_event_set_ready(e); // Stop propagation to screen
 }
 
 // --- Initialize all screens ---
