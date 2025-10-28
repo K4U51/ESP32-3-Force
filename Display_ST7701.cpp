@@ -1,23 +1,21 @@
 #include "Display_ST7701.h"
-#include "LVGL_Driver.h"
 #include <esp_lcd_panel_rgb.h>
 #include <driver/ledc.h>
+#include "LVGL_Driver.h"  // only for panel_handle
 
+// Global handle visible to LVGL
 esp_lcd_panel_handle_t panel_handle = NULL;
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t *buf1 = NULL;
-static lv_color_t *buf2 = NULL;
-static lv_disp_drv_t disp_drv;
 
 void LCD_Init() {
     Serial.println("LCD_Init: Starting ST7701 RGB setup...");
 
-    // Reset panel via expander (if needed)
+    // --- Reset panel via expander (if needed) ---
     Set_EXIO(EXIO_PIN1, 0);
     vTaskDelay(pdMS_TO_TICKS(10));
     Set_EXIO(EXIO_PIN1, 1);
     vTaskDelay(pdMS_TO_TICKS(50));
 
+    // --- Configure RGB timings ---
     esp_lcd_rgb_panel_config_t rgb_config = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
         .timings = {
@@ -39,36 +37,39 @@ void LCD_Init() {
         .num_fbs = 2,
         .hsync_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_HSYNC,
         .vsync_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_VSYNC,
-        .de_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_DE,
+        .de_gpio_num   = ESP_PANEL_LCD_PIN_NUM_RGB_DE,
         .pclk_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_PCLK,
         .disp_gpio_num = ESP_PANEL_LCD_PIN_NUM_RGB_DISP,
         .data_gpio_nums = {
-            ESP_PANEL_LCD_PIN_NUM_RGB_DATA0, ESP_PANEL_LCD_PIN_NUM_RGB_DATA1,
-            ESP_PANEL_LCD_PIN_NUM_RGB_DATA2, ESP_PANEL_LCD_PIN_NUM_RGB_DATA3,
-            ESP_PANEL_LCD_PIN_NUM_RGB_DATA4, ESP_PANEL_LCD_PIN_NUM_RGB_DATA5,
-            ESP_PANEL_LCD_PIN_NUM_RGB_DATA6, ESP_PANEL_LCD_PIN_NUM_RGB_DATA7,
-            ESP_PANEL_LCD_PIN_NUM_RGB_DATA8, ESP_PANEL_LCD_PIN_NUM_RGB_DATA9,
+            ESP_PANEL_LCD_PIN_NUM_RGB_DATA0,  ESP_PANEL_LCD_PIN_NUM_RGB_DATA1,
+            ESP_PANEL_LCD_PIN_NUM_RGB_DATA2,  ESP_PANEL_LCD_PIN_NUM_RGB_DATA3,
+            ESP_PANEL_LCD_PIN_NUM_RGB_DATA4,  ESP_PANEL_LCD_PIN_NUM_RGB_DATA5,
+            ESP_PANEL_LCD_PIN_NUM_RGB_DATA6,  ESP_PANEL_LCD_PIN_NUM_RGB_DATA7,
+            ESP_PANEL_LCD_PIN_NUM_RGB_DATA8,  ESP_PANEL_LCD_PIN_NUM_RGB_DATA9,
             ESP_PANEL_LCD_PIN_NUM_RGB_DATA10, ESP_PANEL_LCD_PIN_NUM_RGB_DATA11,
             ESP_PANEL_LCD_PIN_NUM_RGB_DATA12, ESP_PANEL_LCD_PIN_NUM_RGB_DATA13,
             ESP_PANEL_LCD_PIN_NUM_RGB_DATA14, ESP_PANEL_LCD_PIN_NUM_RGB_DATA15,
         },
         .flags = {
             .fb_in_psram = true,
-            .double_fb = true,
+            .double_fb   = true,
         },
     };
 
+    // --- Create panel handle ---
     ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&rgb_config, &panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
-    // Backlight
-    ledcSetup(0, 5000, 10);
+    Serial.println("LCD_Init: RGB panel initialized.");
+
+    // --- Backlight setup ---
+    ledcSetup(0, 5000, 10);           // Channel 0, 5 kHz, 10-bit
     ledcAttachPin(LCD_Backlight_PIN, 0);
-    ledcWrite(0, 512);  // 50% brightness
+    ledcWrite(0, 512);                // 50% brightness
 
     Serial.println("LCD_Init: Backlight ON.");
 
+    // --- Initialize touch ---
     Touch_Init();
 }
-
