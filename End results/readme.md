@@ -1,4 +1,4 @@
-'''
+```
 GForceGauge/
 │
 ├─ main.ino                # Main Arduino sketch (the full LVGL code)
