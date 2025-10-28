@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include "lvgl.h"
+#include "lvgl.h"
 
 // --- Replace these with your actual PNG images ---
 extern lv_img_dsc_t splash_img;
