@@ -26,7 +26,7 @@ extern lv_img_dsc_t screen2_img;
 extern lv_img_dsc_t screen3_img;
 extern lv_img_dsc_t screen4_img;
 extern lv_img_dsc_t dot_img;
-extern lv_img_dsc_t stamp_img;
+//extern lv_img_dsc_t stamp_img;
 
 // --- Forward declarations for user functions ---
 float get_gyro_x(void);
@@ -244,7 +244,7 @@ void screen4_stamp_task(void *param) {
             int16_t gx = (int16_t)get_gyro_x();
             int16_t gy = (int16_t)get_gyro_y();
             lv_obj_t *stamp = lv_img_create(screen4_container);
-            lv_img_set_src(stamp, &stamp_img);
+            lv_img_set_src(stamp, &dot_img);
             lv_obj_set_pos(stamp, SCREEN_CENTER_X + gx, SCREEN_CENTER_Y + gy);
         }
         vTaskDelay(pdMS_TO_TICKS(200));
