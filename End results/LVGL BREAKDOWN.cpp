@@ -1,9 +1,21 @@
 /*
-  GForce Gauge ESP32-S3 (Waveshare 2.1" Round) - Thread-Safe + ±2.5g
-  --------------------------------------------------------------------
-  - LVGL-safe via lv_async_call() for all UI updates
-  - Tasks suspended/resumed based on active screen
-  - Dot motion scaled to ±2.5 g
+  GForce Gauge ESP32-S3 (Waveshare 2.1" Round) - Thread-Safe + ±2.5g + Lap History
+  --------------------------------------------------------------------------------
+  🧭 TODO BEFORE EXPORT FROM SQUARELINE:
+  -------------------------------------
+  [Screen3: Timer Screen]
+   - Add 2 new labels:
+       ui_TimeLabel1 → "Lap 1: --:--.--"
+       ui_TimeLabel2 → "Lap 2: --:--.--"
+     (Position them below ui_TimerLabel)
+   - Keep existing:
+       ui_TimerLabel, ui_LapButton, ui_ResetButton, ui_LapLabel0–3
+
+  After exporting:
+   - Add to ui.h:
+       extern lv_obj_t *ui_TimeLabel1;
+       extern lv_obj_t *ui_TimeLabel2;
+   - Verify ui.c includes their creation under ui_Screen3.
 */
 
 #include <Arduino.h>
@@ -65,32 +77,62 @@ void lv_scr_change_hook(lv_event_t *e) {
     manage_tasks();  // suspend/resume as needed
 }
 
-// --- Lap button ---
+// --- Lap button (updates laps + new history labels) ---
 void lap_button_cb(lv_event_t *e) {
     if (!screen3_active) return;
 
+    // Store lap
     lap_times[lap_idx] = timer_value;
+
+    // Format for LapLabels
     char buf[16];
     snprintf(buf, sizeof(buf), "%.2f s", lap_times[lap_idx]);
-
-    // Safe LVGL update
-    lv_async_call([](void *p) {
-        lv_label_set_text(ui_LapLabels[((int)p)], ((char*)lv_event_get_user_data(lv_event_get_current())));
-    }, NULL);
-
     lv_label_set_text(ui_LapLabels[lap_idx], buf);
+
+    // Advance index (wrap around)
     lap_idx = (lap_idx + 1) % 4;
+
+    // --- Update new on-screen history labels ---
+    int last1 = (lap_idx + 3) % 4; // most recent
+    int last2 = (lap_idx + 2) % 4; // previous
+
+    char buf1[24], buf2[24];
+    if (lap_times[last1] > 0)
+        snprintf(buf1, sizeof(buf1), "Lap 1: %.2f s", lap_times[last1]);
+    else strcpy(buf1, "Lap 1: --:--.--");
+
+    if (lap_times[last2] > 0)
+        snprintf(buf2, sizeof(buf2), "Lap 2: %.2f s", lap_times[last2]);
+    else strcpy(buf2, "Lap 2: --:--.--");
+
+    lv_async_call([](void *p) {
+        char **data = (char **)p;
+        lv_label_set_text(ui_TimeLabel1, data[0]);
+        lv_label_set_text(ui_TimeLabel2, data[1]);
+        delete[] data[0]; delete[] data[1]; delete[] data;
+    }, ({
+        char **arr = new char*[2];
+        arr[0] = strdup(buf1);
+        arr[1] = strdup(buf2);
+        arr;
+    }));
 }
 
-// --- Reset button ---
+// --- Reset button (clears everything, including new labels) ---
 void reset_button_cb(lv_event_t *e) {
     timer_value = 0;
     lap_idx = 0;
+
     for (int i = 0; i < 4; i++) {
         lap_times[i] = 0;
         lv_label_set_text(ui_LapLabels[i], "--:--.--");
     }
+
     lv_label_set_text(ui_TimerLabel, "0.00 s");
+
+    // Clear the new on-screen history
+    lv_label_set_text(ui_TimeLabel1, "Lap 1: --:--.--");
+    lv_label_set_text(ui_TimeLabel2, "Lap 2: --:--.--");
 }
 
 // --- Task manager ---
