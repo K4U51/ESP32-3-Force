@@ -44,6 +44,7 @@ void Driver_Init()
     QMI8658_Init();
     BAT_Init();
 
+    // Create a background task for drivers
     xTaskCreatePinnedToCore(
         Driver_Loop,
         "Driver Task",
@@ -58,69 +59,47 @@ void Driver_Init()
 // ------------------ G-Force Screen Update ------------------
 void Lvgl_GForce_Loop()
 {
-    if (!ui_dot) return;
+    if (!ui_dot) return;  // make sure UI elements exist
 
-    // Center is 240, 240 for 480x480 display
-    // Scale: ±1G = ±150 pixels from center
+    // Center (240, 240) for 480x480 screen
+    // Scale ±1G = ±150 pixels
     float xpos = 240 - ((x / 9.81f) * 150);
     float ypos = 240 - ((y / 9.81f) * 150);
 
-    // Clamp to screen bounds (with margin for dot size ~37px)
+    // Clamp for safety
     xpos = constrain(xpos, 20, 460);
     ypos = constrain(ypos, 20, 460);
 
     lv_obj_set_pos(ui_dot, (int)xpos, (int)ypos);
 
-    // Update labels with G-force values
-    if (ui_Accel) {
-        float accel_g = y / 9.81f;
-        lv_label_set_text_fmt(ui_Accel, "%.2f", max(accel_g, 0.0f));
-    }
-    if (ui_Brake) {
-        float brake_g = y / 9.81f;
-        lv_label_set_text_fmt(ui_Brake, "%.2f", abs(min(brake_g, 0.0f)));
-    }
-    if (ui_Left) {
-        float left_g = x / 9.81f;
-        lv_label_set_text_fmt(ui_Left, "%.2f", abs(min(left_g, 0.0f)));
-    }
-    if (ui_Right) {
-        float right_g = x / 9.81f;
-        lv_label_set_text_fmt(ui_Right, "%.2f", max(right_g, 0.0f));
-    }
+    // Update G-force readouts
+    if (ui_Accel) lv_label_set_text_fmt(ui_Accel, "%.2f", max(y / 9.81f, 0.0f));
+    if (ui_Brake) lv_label_set_text_fmt(ui_Brake, "%.2f", abs(min(y / 9.81f, 0.0f)));
+    if (ui_Left)  lv_label_set_text_fmt(ui_Left,  "%.2f", abs(min(x / 9.81f, 0.0f)));
+    if (ui_Right) lv_label_set_text_fmt(ui_Right, "%.2f", max(x / 9.81f, 0.0f));
 }
 
 // ------------------ Setup ------------------
 void setup()
 {
     Serial.begin(115200);
-    delay(1000);
+    delay(500);
     Serial.println("\n\n=== System Booting ===");
 
-    // ----------------------------
-    // 1️⃣ Initialize drivers first
-    // ----------------------------
-    Driver_Init();   // Sensors, I2C, gyro, battery, etc.
+    // 1️⃣ Initialize all low-level drivers
+    Driver_Init();   // I2C, EXIO, sensors, battery
 
-    // ----------------------------
-    // 2️⃣ Initialize hardware
-    // ----------------------------
-    LCD_Init();      // Sets up ST7701 panel, backlight, touch
-                     // Note: no LVGL registration here, just hardware
+    // 2️⃣ Initialize LCD hardware
+    LCD_Init();      // Sets up ST7701 RGB panel + panel_handle
 
-    // ----------------------------
-    // 3️⃣ Initialize LVGL
-    // ----------------------------
-    Lvgl_Init();     // lv_init() + flush callback + draw buffers
-                     // Uses the panel_handle created in LCD_Init()
+    // 3️⃣ Initialize LVGL and link to display driver
+    Lvgl_Init();     // Creates LVGL buffers and flush callback
 
-    // ----------------------------
-    // 4️⃣ Initialize your SquareLine UI
-    // ----------------------------
+    // 4️⃣ Initialize the SquareLine-generated UI
     Serial.println("Initializing UI...");
-    ui_init();       // Creates screens, labels, dot, etc.
+    ui_init();
 
-    // Optional: quick test to confirm LVGL works
+    // 5️⃣ Optional confirmation label
     lv_obj_t *label = lv_label_create(lv_scr_act());
     lv_label_set_text(label, "GForce Gauge Ready!");
     lv_obj_center(label);
@@ -131,7 +110,7 @@ void setup()
 // ------------------ Main Loop ------------------
 void loop()
 {
-    Lvgl_GForce_Loop();  // Update G-force display
-    Lvgl_Loop();         // LVGL internal handler (lv_timer_handler)
+    Lvgl_GForce_Loop();  // Update moving dot + G values
+    Lvgl_Loop();         // Keep LVGL alive
     delay(5);
 }
