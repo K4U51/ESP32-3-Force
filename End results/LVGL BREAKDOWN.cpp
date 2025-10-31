@@ -1,10 +1,14 @@
-/* Main.ino
-   2.5g Visualizer with LVGL + SquareLine UI integration
-   - Keep your drivers and offline libs as-is
-   - Map ±2.5g to UI, stamp trail with fade, log X,Y,timestamp to SD
-   - Only run tasks when screen active
+/* Main.ino - 2.5g Visualizer integrated with your drivers
+   Uses:
+    - QMI8658 accelerometer (getAccelerometer called from QMI8658_Loop())
+    - PCF85063 RTC (datetime_t datetime global provided by RTC driver)
+    - SD_MMC (SD_Card.h)
+    - LVGL + SquareLine ui.h (ui_init() and ui_* objects)
 */
 
+/* ----------------------------
+   Includes (your offline drivers)
+   ---------------------------- */
 #include <Arduino.h>
 #include "I2C_Driver.h"
 #include "Gyro_QMI8658.h"
@@ -16,140 +20,158 @@
 #include "Touch_CST820.h"
 #include "ui.h"
 
-// --- Constants ---
+/* ----------------------------
+   External globals from drivers
+   ---------------------------- */
+// IMU data struct and accelerometer values
+extern IMUdata Accel;      // from Gyro_QMI8658.c -> populated by getAccelerometer()
+extern IMUdata Gyro;       // if needed
+extern datetime_t datetime; // from RTC_PCF85063.c
+
+/* ----------------------------
+   Configuration constants
+   ---------------------------- */
 #define SCREEN_CENTER_X 240
 #define SCREEN_CENTER_Y 240
 #define DOT_RADIUS      10
-#define G_MAX           2.5f   // ±2.5g range
-#define MAX_STAMPS      100
-#define STAMP_FADE_MS   700    // fade-out time for each stamp
-#define DOT_UPDATE_MS   20
-#define LABEL_UPDATE_MS 50
-#define TIMER_UPDATE_MS 50
-#define STAMP_UPDATE_MS 200
+#define G_MAX           2.5f   // ±2.5 g visual window
+#define STAMP_FADE_MS   700    // ms fade out
+#define DOT_UPDATE_MS   20     // dot update rate (ms)
+#define STAMP_UPDATE_MS 100    // stamp / log rate (ms)
+#define LABEL_UPDATE_MS 100
 
-// --- Runtime variables ---
-float timer_value = 0.0f;
-float lap_times[4] = {0.0f,0.0f,0.0f,0.0f};
+#define MAX_STAMPS      120
+
+/* ----------------------------
+   State variables
+   ---------------------------- */
+volatile float PeakX = 0.0f, PeakY = 0.0f, PeakZ = 0.0f;
+
+float timer_value = 0.0f;           // seconds
+float lap_times[4] = {0,0,0,0};
 int lap_idx = 0;
 bool timer_running = false;
 
-// Sensor / peaks
-volatile float PeakX = 0.0f, PeakY = 0.0f, PeakZ = 0.0f;
+/* Screen active flags */
+bool screen1_active = false; // GForce screen
+bool screen2_active = false; // Peaks
+bool screen3_active = false; // Timer
+bool screen4_active = false; // Stamp
 
-// Screen actives
-bool screen1_active = false;
-bool screen2_active = false;
-bool screen3_active = false;
-bool screen4_active = false;
-
-// Task handles
+/* Task handles */
 TaskHandle_t dotTaskHandle   = NULL;
 TaskHandle_t labelTaskHandle = NULL;
 TaskHandle_t timerTaskHandle = NULL;
 TaskHandle_t stampTaskHandle = NULL;
 
-// Stamp layer container (SquareLine screen container or object)
+/* Stamp container (SquareLine container for stamp screen) */
 lv_obj_t *stamp_container = NULL;
 
-// Circular buffer for stamps (optional tracking)
+/* Stamp circular buffer (optional tracking) */
 static lv_obj_t *stamp_buf[MAX_STAMPS];
 static uint16_t stamp_buf_idx = 0;
 
-// UI initial states (ensure these names match your SquareLine export)
-const char INITIAL_TIMER_TEXT[] = "00:00.00";
-const char INITIAL_PEAK_TEXT[]  = "0.00";
+/* Time tracking */
+unsigned long startMillis = 0;
 
-// --- Forward declarations ---
+/* For smoothing */
+static float filteredX = 0.0f, filteredY = 0.0f;
+
+/* ----------------------------
+   Forward declarations
+   ---------------------------- */
 void screen1_dot_task(void *param);
 void screen2_label_task(void *param);
 void screen3_timer_task(void *param);
 void screen4_stamp_task(void *param);
 void manage_tasks(void);
-float get_gyro_x(void);
-float get_gyro_y(void);
+void SD_Write_String(const char *s);
 static lv_color_t gforce_to_color(float gx, float gy);
-static String rtc_timestamp_string(); // helper to make timestamp for SD
+static void write_stamp_log_to_sd(const char *ts, float gx, float gy);
 
-// --- Utilities ---
-float get_gyro_x(void) {
-    // QMI8658 library getter, floating g value
-    return QMI8658_getX();
+/* ----------------------------
+   Utility Implementations
+   ---------------------------- */
+
+void SD_Write_String(const char *data)
+{
+    // Append string to gforce_log.txt on SD card
+    File file = SD_MMC.open("/gforce_log.txt", FILE_APPEND);
+    if (!file) {
+        printf("SD: Failed to open /gforce_log.txt for append\r\n");
+        return;
+    }
+    file.print(data);
+    file.close();
 }
-float get_gyro_y(void) {
-    return QMI8658_getY();
-}
+
 static lv_color_t gforce_to_color(float gx, float gy)
 {
     float mag = sqrtf(gx*gx + gy*gy);
     float norm = constrain(mag / G_MAX, 0.0f, 1.0f);
-    // green -> red scale
     uint8_t r = (uint8_t)(255 * norm);
     uint8_t g = (uint8_t)(255 * (1.0f - norm));
-    return lv_color_make(r, g, 0);
-}
-static String rtc_timestamp_string()
-{
-    // Use rtc_time (PCF85063) if you update a global rtc_time in your RTC_Loop.
-    // If you don't maintain a global struct, fallback to millis timestamp.
-    // We'll attempt to use rtc_time if present (user earlier used 'rtc_time' struct).
-    // If you have a getter, replace access accordingly.
-    // Fallback to millis:
-    char buf[64];
-    // If you maintain rtc_time (datetime_t rtc_time), comment-in below and adjust
-    // snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d", rtc_time.year,... );
-    snprintf(buf, sizeof(buf), "%lu", millis());
-    return String(buf);
+    return lv_color_make(r,g,0);
 }
 
-// --- Screen change hook: called when the active screen changes ---
-// Wire this up to each screen with LV_EVENT_SCREEN_LOADED or SCREEN_CHANGED depending on SquareLine version
+static void write_stamp_log_to_sd(const char *ts, float gx, float gy)
+{
+    char buf[128];
+    // write CSV: timestamp, Xg, Yg
+    snprintf(buf, sizeof(buf), "%s,%.3f,%.3f\n", ts, gx, gy);
+    SD_Write_String(buf);
+}
+
+/* ----------------------------
+   LVGL screen change hook
+   - attach to screens with LV_EVENT_SCREEN_LOADED (or SCREEN_CHANGED)
+   ---------------------------- */
 void lv_scr_change_hook(lv_event_t *e)
 {
     LV_UNUSED(e);
     lv_obj_t *act = lv_scr_act();
 
-    // NOTE: adjust these names if your SquareLine screens are named differently
-    screen1_active = (act == ui_Screen1 || act == ui_Screen1Container || act == ui_Screen1Screen);
-    screen2_active = (act == ui_Screen2 || act == ui_Screen2Container);
-    screen3_active = (act == ui_Screen3 || act == ui_Screen3Container);
-    screen4_active = (act == ui_Screen4 || act == ui_Screen4Container);
+    // Update flags - replace names if your exported names differ
+    screen1_active = (act == ui_Screen1 || act == ui_GForceScreen);
+    screen2_active = (act == ui_Screen2 || act == ui_PeaksScreen);
+    screen3_active = (act == ui_Screen3 || act == ui_TimerScreen);
+    screen4_active = (act == ui_Screen4 || act == ui_StampScreen);
 
-    // Timer runs only when Timer screen is active
+    // Timer runs only when Timer screen active
     timer_running = screen3_active;
 
-    manage_tasks(); // suspend/resume the background tasks accordingly
+    manage_tasks();
 }
 
-// --- Lap button callback (Left button behavior per spec: stop timer and move to lap history) ---
+/* ----------------------------
+   Button callbacks
+   - lap_button: Lbutton behavior: stop timer and log current to lap history (per your spec)
+   - reset_button: Rbutton behavior: reset timer to 00:00.00 and clear peaks/laps
+   ---------------------------- */
 void lap_button_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     if (!screen3_active) return;
 
-    // Stop the timer (per spec lbutton stops timer and moves current time to TimerScreen1)
+    // Stop timer
     timer_running = false;
 
-    // Save current timer value to history in slot 0 (most recent)
+    // Insert current timer_value into lap history (most recent at [0])
+    // shift older down
+    for (int i = 3; i > 0; --i) lap_times[i] = lap_times[i-1];
     lap_times[0] = timer_value;
 
-    // Shift older
-    for (int i = 3; i > 0; --i) lap_times[i] = lap_times[i-1]; // rotate older down
-
-    // Update on-screen two prior laps (we show lap_times[0] and lap_times[1])
+    // Update two display labels (TimeLabel1 & TimeLabel2)
     char buf1[32], buf2[32];
-    if (lap_times[0] > 0.0f) snprintf(buf1, sizeof(buf1), "Lap 1: %.2f s", lap_times[0]);
-    else snprintf(buf1, sizeof(buf1), "Lap 1: --:--.--");
-    if (lap_times[1] > 0.0f) snprintf(buf2, sizeof(buf2), "Lap 2: %.2f s", lap_times[1]);
-    else snprintf(buf2, sizeof(buf2), "Lap 2: --:--.--");
+    if (lap_times[0] > 0.0f) snprintf(buf1, sizeof(buf1), "Lap 1: %.2f s", lap_times[0]); else snprintf(buf1, sizeof(buf1), "Lap 1: --:--.--");
+    if (lap_times[1] > 0.0f) snprintf(buf2, sizeof(buf2), "Lap 2: %.2f s", lap_times[1]); else snprintf(buf2, sizeof(buf2), "Lap 2: --:--.--");
 
-    // Update UI labels asynchronously
     char *c1 = strdup(buf1);
     char *c2 = strdup(buf2);
     lv_async_call([](void *p){
-        char **arr = (char**)p;
-        lv_label_set_text(ui_TimeLabel1, arr[0]);
-        lv_label_set_text(ui_TimeLabel2, arr[1]);
+        char **arr = (char **)p;
+        if (ui_TimeLabel1) lv_label_set_text(ui_TimeLabel1, arr[0]);
+        if (ui_TimeLabel2) lv_label_set_text(ui_TimeLabel2, arr[1]);
         free(arr[0]); free(arr[1]); free(arr);
     }, ({
         char **arr = (char**)malloc(sizeof(char*)*2);
@@ -157,104 +179,96 @@ void lap_button_cb(lv_event_t *e)
     }));
 }
 
-// --- Reset button callback (Right button per spec: reset Timerscreen to 00:00.000) ---
 void reset_button_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    // Reset timer and clear displayed lap history (also reset peak labels)
     timer_running = false;
     timer_value = 0.0f;
     for (int i=0;i<4;i++) lap_times[i]=0.0f;
 
-    // UI updates
+    // Reset UI labels via async call
     lv_async_call([](void *p){
-        lv_label_set_text(ui_TimerLabel, INITIAL_TIMER_TEXT);
-        // clear lap labels (assuming ui_LapLabels[0..3] exist)
-        for (int i=0;i<4;i++){
-            if (ui_LapLabels[i]) lv_label_set_text(ui_LapLabels[i], "--:--.--");
+        if (ui_TimerLabel) lv_label_set_text(ui_TimerLabel, "00:00.00");
+        if (ui_TimeLabel1) lv_label_set_text(ui_TimeLabel1, "Lap 1: --:--.--");
+        if (ui_TimeLabel2) lv_label_set_text(ui_TimeLabel2, "Lap 2: --:--.--");
+        if (ui_LapLabels) {
+            for (int i=0;i<4;i++) if (ui_LapLabels[i]) lv_label_set_text(ui_LapLabels[i], "--:--.--");
         }
-        lv_label_set_text(ui_TimeLabel1, "Lap 1: --:--.--");
-        lv_label_set_text(ui_TimeLabel2, "Lap 2: --:--.--");
-        lv_label_set_text(ui_peakX_label, INITIAL_PEAK_TEXT);
-        lv_label_set_text(ui_peakY_label, INITIAL_PEAK_TEXT);
-        lv_label_set_text(ui_peakZ_label, INITIAL_PEAK_TEXT);
+        if (ui_peakX_label) lv_label_set_text(ui_peakX_label, "0.00");
+        if (ui_peakY_label) lv_label_set_text(ui_peakY_label, "0.00");
+        if (ui_peakZ_label) lv_label_set_text(ui_peakZ_label, "0.00");
     }, NULL);
 }
 
-// --- Task manager: resume/suspend per-screen tasks ---
-// Note: tasks are created and then immediately suspended after creation in setup()
+/* ----------------------------
+   Manage/Resume/Suspend tasks depending on active screen
+   ---------------------------- */
 void manage_tasks(void)
 {
-    // dot task -> screen1
     if (dotTaskHandle) {
         if (screen1_active) vTaskResume(dotTaskHandle); else vTaskSuspend(dotTaskHandle);
     }
-    // label task -> screen2 (peak display)
     if (labelTaskHandle) {
         if (screen2_active) vTaskResume(labelTaskHandle); else vTaskSuspend(labelTaskHandle);
     }
-    // timer task -> screen3 (timer & lap)
     if (timerTaskHandle) {
         if (screen3_active) vTaskResume(timerTaskHandle); else vTaskSuspend(timerTaskHandle);
     }
-    // stamp task -> screen4 (stamping)
     if (stampTaskHandle) {
         if (screen4_active) vTaskResume(stampTaskHandle); else vTaskSuspend(stampTaskHandle);
     }
 }
 
-// --- Setup ---
-void setup() {
+/* ----------------------------
+   Setup
+   ---------------------------- */
+void setup()
+{
     Serial.begin(115200);
     Serial.println("GForce Gauge Booting...");
 
-    // Initialize drivers - keep exact order as your environment requires
+    // Preserve your initialization order
     I2C_Init();
-    Gyro_Init();
-    RTC_Init();         // if you have a function to init rtc
+    QMI8658_Init();
+    PCF85063_Init();
     SD_Init();
     Lvgl_Display_Init();
     Touch_CST820_Init();
 
-    // Init UI exported from SquareLine
+    // Init SquareLine UI
     ui_init();
 
-    // Hook screen change (use LV_EVENT_SCREEN_LOADED or SCREEN_LOADED, try SCREEN_CHANGED)
-    // SquareLine/LVGL version differences: try LV_EVENT_SCREEN_LOADED or LV_EVENT_SCREEN_CHANGED
+    // Hook screens for change notifications (attach to loaded event)
+    // Use the event your LVGL version supports - try SCREEN_LOADED or SCREEN_CHANGED if needed
     lv_obj_add_event_cb(ui_Screen1, lv_scr_change_hook, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(ui_Screen2, lv_scr_change_hook, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(ui_Screen3, lv_scr_change_hook, LV_EVENT_SCREEN_LOADED, NULL);
     lv_obj_add_event_cb(ui_Screen4, lv_scr_change_hook, LV_EVENT_SCREEN_LOADED, NULL);
 
-    // Hook control buttons (names must match your SquareLine objects)
-    lv_obj_add_event_cb(ui_LapButton, lap_button_cb, LV_EVENT_CLICKED, NULL);   // lbutton
-    lv_obj_add_event_cb(ui_ResetButton, reset_button_cb, LV_EVENT_CLICKED, NULL); // rbutton
+    // Hook buttons (SquareLine names must match)
+    if (ui_LapButton)   lv_obj_add_event_cb(ui_LapButton, lap_button_cb, LV_EVENT_CLICKED, NULL);
+    if (ui_ResetButton) lv_obj_add_event_cb(ui_ResetButton, reset_button_cb, LV_EVENT_CLICKED, NULL);
 
-    // Prepare stamp container (you can also point to an existing SquareLine container if you made one)
-    // We expect ui_Screen4Container to be the stamping area (SquareLine needs to provide this)
+    // Prepare stamp container (SquareLine container for stamps)
     stamp_container = ui_Screen4Container ? ui_Screen4Container : ui_Screen4; // fallback
 
-    // Initial UI values
-    lv_label_set_text(ui_TimerLabel, INITIAL_TIMER_TEXT);
-    lv_label_set_text(ui_peakX_label, INITIAL_PEAK_TEXT);
-    lv_label_set_text(ui_peakY_label, INITIAL_PEAK_TEXT);
-    lv_label_set_text(ui_peakZ_label, INITIAL_PEAK_TEXT);
-    for (int i=0;i<4;i++) {
-        if (ui_LapLabels[i]) lv_label_set_text(ui_LapLabels[i], "--:--.--");
-    }
-    lv_label_set_text(ui_TimeLabel1, "Lap 1: --:--.--");
-    lv_label_set_text(ui_TimeLabel2, "Lap 2: --:--.--");
+    // Init UI labels
+    if (ui_TimerLabel) lv_label_set_text(ui_TimerLabel, "00:00.00");
+    if (ui_peakX_label) lv_label_set_text(ui_peakX_label, "0.00");
+    if (ui_peakY_label) lv_label_set_text(ui_peakY_label, "0.00");
+    if (ui_peakZ_label) lv_label_set_text(ui_peakZ_label, "0.00");
+    for (int i=0;i<4;i++) if (ui_LapLabels && ui_LapLabels[i]) lv_label_set_text(ui_LapLabels[i], "--:--.--");
+    if (ui_TimeLabel1) lv_label_set_text(ui_TimeLabel1, "Lap 1: --:--.--");
+    if (ui_TimeLabel2) lv_label_set_text(ui_TimeLabel2, "Lap 2: --:--.--");
 
-    // Show splash (SquareLine splash screen name may vary)
+    // Load splash screen and auto advance to screen1 (GForce) after 2s
     lv_scr_load(ui_SplashScreen);
-
-    // auto transition to GForce (Screen1) after 2 s
-    lv_timer_create([](lv_timer_t * t){
+    lv_timer_create([](lv_timer_t *t){
         lv_scr_load_anim(ui_Screen1, LV_SCR_LOAD_ANIM_FADE_ON, 400, 0, false);
         lv_timer_del(t);
     }, 2000, NULL);
 
-    // Create tasks: start suspended (create then suspend immediately)
+    // Create tasks suspended
     xTaskCreatePinnedToCore(screen1_dot_task,   "dot_task",   4096, NULL, 2, &dotTaskHandle,   1);
     if (dotTaskHandle) vTaskSuspend(dotTaskHandle);
     xTaskCreatePinnedToCore(screen2_label_task, "label_task", 4096, NULL, 2, &labelTaskHandle, 1);
@@ -264,52 +278,58 @@ void setup() {
     xTaskCreatePinnedToCore(screen4_stamp_task, "stamp_task", 4096, NULL, 2, &stampTaskHandle, 1);
     if (stampTaskHandle) vTaskSuspend(stampTaskHandle);
 
-    // Load splash screen; user may swipe to screens or auto transition
-    Serial.println("UI initialized — ready.");
+    // start time
+    startMillis = millis();
+
+    Serial.println("Initialization complete.");
 }
 
-// --- Main Loop ---
-void loop() {
-    lv_timer_handler(); // LVGL tick tasks
-    delay(5);
+/* ----------------------------
+   Loop
+   ---------------------------- */
+void loop()
+{
+    // LVGL handler (your Lvgl_Loop or lv_timer_handler)
+    Lvgl_Loop();
+    vTaskDelay(pdMS_TO_TICKS(5));
 }
 
-/* -------------------------
-   SCREEN TASKS
-   ------------------------- */
+/* ----------------------------
+   Screen Tasks
+   ---------------------------- */
 
-// --- Screen1: moving dot task (±2.5 g mapped) ---
+// Screen1: moving dot task (±2.5g) - updates dot position and peak values
 void screen1_dot_task(void *param)
 {
     (void)param;
-    const float alpha = 0.15f;
-    static float fx = 0, fy = 0;
+    const float alpha = 0.15f; // smoothing
+    float fx = 0.0f, fy = 0.0f;
 
     while (1) {
-        float gx = get_gyro_x();
-        float gy = get_gyro_y();
+        // Ensure accelerometer is updated - your driver has QMI8658_Loop called elsewhere or run it here
+        QMI8658_Loop(); // will call getAccelerometer() and update Accel.x,y
 
-        // update peaks
-        if (fabs(gx) > PeakX) PeakX = fabs(gx);
-        if (fabs(gy) > PeakY) PeakY = fabs(gy);
-        // Z not used for center but record
-        float gz = QMI8658_getZ();
-        if (fabs(gz) > PeakZ) PeakZ = fabs(gz);
+        float gx = Accel.x; // in g (accelScales applied inside getAccelerometer)
+        float gy = Accel.y;
 
-        // low-pass filter
+        // Update peaks
+        if (fabsf(gx) > PeakX) PeakX = fabsf(gx);
+        if (fabsf(gy) > PeakY) PeakY = fabsf(gy);
+        if (fabsf(Accel.z) > PeakZ) PeakZ = fabsf(Accel.z);
+
+        // Low-pass filter
         fx = fx * (1.0f - alpha) + gx * alpha;
         fy = fy * (1.0f - alpha) + gy * alpha;
 
-        // map to pixel radius (±200 px area as your earlier draft; adapt if you want ±100)
-        int16_t x = (int16_t)constrain((fx / G_MAX) * 200.0f, -200.0f, 200.0f);
-        int16_t y = (int16_t)constrain((fy / G_MAX) * 200.0f, -200.0f, 200.0f);
+        // Map ±G_MAX to ±200 px (adjust if you want ±100)
+        int16_t px = (int16_t)constrain((fx / G_MAX) * 200.0f, -200.0f, 200.0f);
+        int16_t py = (int16_t)constrain((fy / G_MAX) * 200.0f, -200.0f, 200.0f);
 
-        // compute color by magnitude
         lv_color_t color = gforce_to_color(gx, gy);
 
-        // post UI update via async call
+        // Post UI update async
         int16_t *pos = new int16_t[2];
-        pos[0] = x; pos[1] = y;
+        pos[0] = px; pos[1] = py;
         lv_async_call([](void *p){
             int16_t *pp = (int16_t*)p;
             if (ui_DotImage) {
@@ -323,28 +343,18 @@ void screen1_dot_task(void *param)
     }
 }
 
-// --- Screen2: peak/neg/total labels (runs only when Peaks screen active) ---
+// Screen2: peaks label updater
 void screen2_label_task(void *param)
 {
     (void)param;
-    float y_peak_pos = 0.0f;
-    float y_peak_neg = 0.0f;
-    float x_peak = 0.0f;
-
     while (1) {
-        float gx = get_gyro_x();
-        float gy = get_gyro_y();
-        if (gy > y_peak_pos) y_peak_pos = gy;
-        if (gy < y_peak_neg) y_peak_neg = gy;
-        if (fabs(gx) > x_peak) x_peak = fabs(gx);
+        // format strings for peaks
+        char bufx[32], bufy[32], bufz[32];
+        snprintf(bufx, sizeof(bufx), "Peak X: %.2f", PeakX);
+        snprintf(bufy, sizeof(bufy), "Peak Y: %.2f", PeakY);
+        snprintf(bufz, sizeof(bufz), "Peak Z: %.2f", PeakZ);
 
-        char buf_px[32], buf_py[32], buf_pz[32];
-        snprintf(buf_px, sizeof(buf_px), "Peak X: %.2f", x_peak);
-        snprintf(buf_py, sizeof(buf_py), "Peak Y: %.2f", fabs(y_peak_pos) > fabs(y_peak_neg) ? fabs(y_peak_pos) : fabs(y_peak_neg));
-        snprintf(buf_pz, sizeof(buf_pz), "Peak Z: %.2f", PeakZ);
-
-        // Update UI asynchronously
-        char *p1 = strdup(buf_px), *p2 = strdup(buf_py), *p3 = strdup(buf_pz);
+        char *p1 = strdup(bufx), *p2 = strdup(bufy), *p3 = strdup(bufz);
         lv_async_call([](void *p){
             char **arr = (char**)p;
             if (ui_peakX_label) lv_label_set_text(ui_peakX_label, arr[0]);
@@ -360,7 +370,7 @@ void screen2_label_task(void *param)
     }
 }
 
-// --- Screen3: Timer task (controls main timer on Timer screen) ---
+// Screen3: timer task (start/stop and display)
 void screen3_timer_task(void *param)
 {
     (void)param;
@@ -370,14 +380,13 @@ void screen3_timer_task(void *param)
         uint32_t now = millis();
         if (timer_running) {
             timer_value += (now - last_ms) / 1000.0f;
-            // update Timer display
-            char buf[32];
-            // format mm:ss.hh (minutes:seconds.centiseconds)
+            // format mm:ss.cc
             unsigned long total_cs = (unsigned long)(timer_value * 100.0f);
             unsigned int cs = total_cs % 100;
             unsigned long tot_s = total_cs / 100;
             unsigned int s = tot_s % 60;
             unsigned int m = (tot_s / 60) % 1000;
+            char buf[32];
             snprintf(buf, sizeof(buf), "%02u:%02u.%02u", m, s, cs);
             char *txt = strdup(buf);
             lv_async_call([](void *p){
@@ -386,63 +395,64 @@ void screen3_timer_task(void *param)
                 free(s);
             }, txt);
         } else {
-            // if not running, ensure label shows 00:00.00 when timer_value == 0
             if (timer_value == 0.0f) {
-                lv_async_call([](void *p){
-                    if (ui_TimerLabel) lv_label_set_text(ui_TimerLabel, INITIAL_TIMER_TEXT);
-                }, NULL);
+                lv_async_call([](void *p){ if (ui_TimerLabel) lv_label_set_text(ui_TimerLabel, "00:00.00"); }, NULL);
             }
             last_ms = now;
         }
         last_ms = now;
-        vTaskDelay(pdMS_TO_TICKS(TIMER_UPDATE_MS));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-// --- Screen4: stamp task (creates stamps, fades them, logs to SD) ---
+// Screen4: stamping + SD logging
 void screen4_stamp_task(void *param)
 {
     (void)param;
-
     while (1) {
-        float gx = get_gyro_x();
-        float gy = get_gyro_y();
+        // Ensure accelerometer & RTC updated
+        QMI8658_Loop();           // updates Accel
+        PCF85063_Read_Time(&datetime); // updates global datetime (RTC_Loop does same elsewhere)
 
-        // clamp to ±G_MAX and map
+        float gx = Accel.x;
+        float gy = Accel.y;
+
+        // map to stamp px area
         int16_t sx = (int16_t)constrain((gx / G_MAX) * 200.0f, -200.0f, 200.0f);
         int16_t sy = (int16_t)constrain((gy / G_MAX) * 200.0f, -200.0f, 200.0f);
 
-        // color computed from current magnitude
         lv_color_t color = gforce_to_color(gx, gy);
 
-        // Create stamp on UI and schedule fade + delete; also write to SD
-        struct StampData {
-            int16_t x, y;
+        // prepare timestamp string from RTC
+        char ts_buf[64];
+        datetime_to_str(ts_buf, datetime); // uses your driver helper; format can be changed
+
+        // Post UI creation and animation, and write to SD inside async call
+        struct StampInfo {
+            int16_t sx, sy;
             lv_color_t col;
-            char *ts;
+            char ts[64];
+            float gx, gy;
         };
-        StampData *sd = (StampData*)malloc(sizeof(StampData));
-        sd->x = sx; sd->y = sy;
-        sd->col = color;
-        String t = rtc_timestamp_string();
-        sd->ts = strdup(t.c_str());
+        StampInfo *si = (StampInfo*)malloc(sizeof(StampInfo));
+        si->sx = sx; si->sy = sy; si->col = color; strcpy(si->ts, ts_buf); si->gx = gx; si->gy = gy;
 
         lv_async_call([](void *p){
-            StampData *s = (StampData*)p;
-            // create an lv_obj (small circle) inside stamp_container
+            StampInfo *s = (StampInfo*)p;
+            // create small circle
             lv_obj_t *st = lv_obj_create(stamp_container);
             lv_obj_set_size(st, 6, 6);
             lv_obj_set_style_radius(st, LV_RADIUS_CIRCLE, 0);
             lv_obj_set_style_bg_color(st, s->col, 0);
             lv_obj_set_style_border_width(st, 0, 0);
             lv_obj_set_style_opa(st, LV_OPA_COVER, 0);
-            lv_obj_set_pos(st, SCREEN_CENTER_X - 3 + s->x, SCREEN_CENTER_Y - 3 + s->y);
+            lv_obj_set_pos(st, SCREEN_CENTER_X - 3 + s->sx, SCREEN_CENTER_Y - 3 + s->sy);
 
-            // Keep pointer for optional management (circular buffer)
+            // add to circular buffer
             stamp_buf[stamp_buf_idx] = st;
             stamp_buf_idx = (stamp_buf_idx + 1) % MAX_STAMPS;
 
-            // animate opacity -> transparent then delete
+            // fade animation then delete
             lv_anim_t a;
             lv_anim_init(&a);
             lv_anim_set_var(&a, st);
@@ -450,21 +460,17 @@ void screen4_stamp_task(void *param)
             lv_anim_set_time(&a, STAMP_FADE_MS);
             lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_style_opa);
             lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
-            lv_anim_set_ready_cb(&a, [](lv_anim_t * a){
-                lv_obj_del((lv_obj_t*)a->var);
-            });
+            lv_anim_set_ready_cb(&a, [](lv_anim_t * a){ lv_obj_del((lv_obj_t*)a->var); });
             lv_anim_start(&a);
 
-            // Write to SD: CSV line timestamp, x,y
-            char logbuf[128];
-            // s->ts has timestamp (string); if it's just millis, fine
-            snprintf(logbuf, sizeof(logbuf), "%s,%.3f,%.3f\n", s->ts ? s->ts : "0", (float)s->x/200.0f*G_MAX, (float)s->y/200.0f*G_MAX);
-            SD_Write_String(logbuf);
+            // log to SD using provided timestamp & g-values (map px back to g if needed)
+            char logline[128];
+            // prefer using s->ts from RTC formatted via datetime_to_str
+            snprintf(logline, sizeof(logline), "%s,%.3f,%.3f\n", s->ts, s->gx, s->gy);
+            SD_Write_String(logline);
 
-            // cleanup stampdata
-            free(s->ts);
             free(s);
-        }, sd);
+        }, si);
 
         vTaskDelay(pdMS_TO_TICKS(STAMP_UPDATE_MS));
     }
